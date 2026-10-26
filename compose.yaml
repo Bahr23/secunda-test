@@ -1,0 +1,83 @@
+name: secunda
+
+x-app: &app
+  build: .
+  image: secunda:local
+  environment: &environment
+    MYSQL_DSN: "${MYSQL_USER:-secunda}:${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}@tcp(mysql:3306)/${MYSQL_DATABASE:-secunda}?parseTime=true&charset=utf8mb4"
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    JWT_TTL: ${JWT_TTL:-24h}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+    LOG_FORMAT: ${LOG_FORMAT:-json}
+    HTTP_TIMEOUT: ${HTTP_TIMEOUT:-10s}
+    SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-15s}
+    BCRYPT_COST: ${BCRYPT_COST:-12}
+    CACHE_TIMEOUT: ${CACHE_TIMEOUT:-150ms}
+    CACHE_BREAKER_FAILURES: ${CACHE_BREAKER_FAILURES:-5}
+    CACHE_BREAKER_TIMEOUT: ${CACHE_BREAKER_TIMEOUT:-10s}
+    RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+    RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
+    RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-100}
+    AUTH_RATE_LIMIT_RPS: ${AUTH_RATE_LIMIT_RPS:-1}
+    AUTH_RATE_LIMIT_BURST: ${AUTH_RATE_LIMIT_BURST:-10}
+    RATE_LIMIT_MAX_KEYS: ${RATE_LIMIT_MAX_KEYS:-10000}
+    RATE_LIMIT_IDLE_TTL: ${RATE_LIMIT_IDLE_TTL:-10m}
+  networks: [backend]
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-secunda}
+      MYSQL_USER: ${MYSQL_USER:-secunda}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+    volumes: [mysql_data:/var/lib/mysql]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u "$$MYSQL_USER" "$$MYSQL_DATABASE" -e "SELECT 1" >/dev/null 2>&1']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --maxmemory, 128mb, --maxmemory-policy, allkeys-lru, --save, "", --appendonly, "no"]
+    networks: [backend]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    <<: *app
+    command: [migrate]
+    depends_on:
+      mysql: {condition: service_healthy}
+    restart: "no"
+
+  app:
+    <<: *app
+    ports: ["127.0.0.1:${HTTP_PORT:-8080}:8080"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/readyz]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mysql_data:
+networks:
+  backend:
